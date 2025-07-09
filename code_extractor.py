@@ -1,11 +1,12 @@
-# --- START OF FILE code (2) - Copy.txt (Refined for Java Naming) ---
-
 import os
 import re
 import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
 import sys
+import subprocess
+import zipfile
+import shutil # Added for robust directory removal
 
 def detect_language_and_extension(code_block, lang_hint=None):
     """
@@ -44,32 +45,32 @@ def detect_language_and_extension(code_block, lang_hint=None):
 
     if lang_hint:
         lang_hint = lang_hint.strip().lower()
-        # For Dockerfile/Makefile, the hint might be lowercase but the desired extension has capitals
         if lang_hint == 'dockerfile': return 'Dockerfile'
         if lang_hint == 'makefile': return 'Makefile'
-        # For Java, return 'java' if hint is related to Java
-        if 'java' in lang_hint or 'gradle' in lang_hint: # Consider gradle hint as potentially Java-related for detection purposes
+        if 'java' in lang_hint or 'gradle' in lang_hint:
              return 'java'
-        return ext_map.get(lang_hint, 'txt') # Default to 'txt' if hint is unknown
+        return ext_map.get(lang_hint, 'txt')
 
-    # Content-based heuristics - Order matters!
-    # Check for Java keywords/structures
     if 'public class' in code_block or 'public interface' in code_block or 'public enum' in code_block or 'public record' in code_block or 'public @interface' in code_block:
          return 'java'
-    # More basic Java check if not public
     if ' class ' in code_block or ' interface ' in code_block or ' enum ' in code_block or ' record ' in code_block:
-         # Add checks to avoid misclassifying other languages that might use these words
          if not any(kw in code_block for kw in ['def ', 'function ', '#include']):
               return 'java'
 
+    if re.search(r'\bdef\s+\w+\s*\(', code_block) or 'import ' in code_block: return 'py'
 
     if code_block.strip().startswith('using ') and 'namespace' in code_block and (';' in code_block or '{' in code_block): return 'cs'
-    if 'def ' in code_block or 'import ' in code_block: return 'py'
     if code_block.strip().lower().startswith('<!doctype html') or ('<html' in code_block.lower() and '</html' in code_block.lower()): return 'html'
-    if '<style>' in code_block.lower() or ('{' in code_block and '}' in code_block and (':' in code_block or ';' in code_block) and not any(kw in code_block for kw in ['<html', 'public class', 'def ', 'function'])): # Basic CSS check
-        # More refined CSS: look for common properties or selectors if it's not clearly something else
+
+    # Basic CSS check: look for common properties or selectors if it's not clearly something else
+    # Regex breakdown:
+    # (\w+(-\w+)*\s*:\s*\w+) : matches 'property-name: value' (e.g., font-size: 12px)
+    # (\.\w+\s*\{) : matches a class selector (e.g., .my-class {)
+    # (#\w+\s*\{) : matches an ID selector (e.g., #my-id {)
+    if '<style>' in code_block.lower() or ('{' in code_block and '}' in code_block and (':' in code_block or ';' in code_block) and not any(kw in code_block for kw in ['<html', 'public class', 'def ', 'function'])):
         if re.search(r'(\w+(-\w+)*\s*:\s*\w+)|(\.\w+\s*\{)|(#\w+\s*\{)', code_block.lower()):
             return 'css'
+
     if 'function ' in code_block or 'console.log' in code_block or 'var ' in code_block or 'let ' in code_block or 'const ' in code_block: return 'js'
     if 'SELECT ' in code_block.upper() or 'INSERT INTO' in code_block.upper() or 'UPDATE ' in code_block.upper() or 'DELETE FROM' in code_block.upper(): return 'sql'
     if '#include' in code_block or 'int main(' in code_block: return 'cpp'
@@ -82,17 +83,19 @@ def detect_language_and_extension(code_block, lang_hint=None):
 
     # JSON detection (more specific than generic C-like)
     # Checks for {..} or [..] and presence of ":" and quotes typical of JSON
+    # Regex breakdown for value pattern:
+    # (?:"(?:\\.|[^"\\])*"|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|{|\[)
+    # This matches valid JSON values: a string, true/false/null, a number, or an object/array start.
     if (code_block.strip().startswith('{') and code_block.strip().endswith('}')) or \
        (code_block.strip().startswith('[') and code_block.strip().endswith(']')):
-        # Regex for "key": value pattern (value can be string, number, bool, null, object, array)
         if re.search(r'"\s*:\s*(?:"(?:\\.|[^"\\])*"|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|{|\[)', code_block):
             return 'json'
 
     # Generic C-like language fallback (less specific)
     if '{' in code_block and '}' in code_block and ';' in code_block:
-        return 'txt' # Default to 'txt' to avoid misclassifying as JS or other specific C-like languages
+        return 'txt'
 
-    return 'txt' # Default fallback
+    return 'txt'
 
 def extract_java_class_name(code_block):
     """
@@ -100,25 +103,17 @@ def extract_java_class_name(code_block):
     or the first top-level type if no public one exists, from a Java code block.
     This name is typically used for the file name.
     """
-    # Patterns to find top-level type declarations:
-    # Look for 'public' types first as they dictate the file name
     public_type_pattern = r'public\s+(class|interface|enum|@?interface|record)\s+(\w+)'
-    # Fallback pattern for non-public types (only checked if no public type found)
     any_type_pattern = r'(class|interface|enum|@?interface|record)\s+(\w+)'
 
-    # Search for public types first
     public_match = re.search(public_type_pattern, code_block)
     if public_match:
-        # Return the captured name (group 2)
         return public_match.group(2)
 
-    # If no public type is found, search for any top-level type as a fallback heuristic
     any_type_match = re.search(any_type_pattern, code_block)
     if any_type_match:
-        # Return the captured name (group 2) of the first type found
         return any_type_match.group(2)
 
-    # If no type declaration is found, return None
     return None
 
 def get_initial_dialog_dir():
@@ -131,206 +126,281 @@ def get_initial_dialog_dir():
     else:
         return str(Path.home())
 
-def extract_code_blocks(filepath, base_output_dir_path_str):
+def open_folder_in_explorer(path: Path):
+    """
+    Opens the given folder path in the system's default file explorer.
+    Handles different operating systems.
+    """
+    if not path.is_dir():
+        print(f"Warning: Directory not found or is not a directory: '{path}'")
+        return
+
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+        elif sys.platform == "darwin": # macOS
+            subprocess.run(["open", str(path)], check=True)
+        elif sys.platform.startswith("linux"):
+            try:
+                subprocess.run(["xdg-open", str(path)], check=True)
+            except FileNotFoundError:
+                subprocess.run(["gio", "open", str(path)], check=True)
+        elif sys.platform == "android":
+             print(f"\nOn Android, please navigate to the output folder manually:")
+             print(f"  {path}")
+             print("You might need a file manager app to open this path (e.g., in Termux, check if 'xdg-open' or 'termux-open' is installed and configured).")
+             return
+        else:
+            print(f"Unsupported operating system '{sys.platform}'. Cannot automatically open folder.")
+            print(f"Please navigate to the output folder manually: '{path}'")
+    except Exception as e:
+        print(f"Error attempting to open folder '{path}': {e}")
+        print("Please navigate to the output folder manually.")
+
+def extract_code_blocks(filepath, base_output_dir_path_str) -> Path | None:
+    """
+    Extracts code blocks from the input file, saves them to a temporary subdirectory,
+    then compresses them into a ZIP file.
+    Returns the path to the created ZIP file on success, or the temporary directory
+    if zipping fails, or None on critical failure/cancellation.
+    """
     if not filepath:
         print("No input file selected. Operation cancelled.")
-        return
+        return None
     if not base_output_dir_path_str:
         print("No base output directory selected. Operation cancelled.")
-        return
+        return None
 
     input_file_path = Path(filepath)
     base_output_dir = Path(base_output_dir_path_str)
 
-    # Create a sub-directory named after the input file (without extension)
-    output_subdir_name = f"{input_file_path.stem}_extracted_code"
-    final_output_dir = base_output_dir / output_subdir_name
+    temp_output_subdir_name = f"{input_file_path.stem}_extracted_code_temp"
+    temp_output_dir = base_output_dir / temp_output_subdir_name
+    zip_filename = base_output_dir / f"{input_file_path.stem}_extracted_code.zip"
 
     try:
         with open(input_file_path, 'r', encoding='utf-8') as f:
             content = f.read()
     except FileNotFoundError:
         print(f"❌ Error: Input file not found at '{input_file_path}'")
-        return
+        return None
     except Exception as e:
         print(f"❌ Error reading input file '{input_file_path}': {e}")
-        return
+        return None
 
-    # Regex to find code blocks: ```[optional_language_hint]\ncode\n```
-    # re.DOTALL allows '.' to match newlines, capturing multiline code blocks.
-    # The first group captures the language hint (optional).
-    # The second group captures the code content.
     pattern = r'```(\w+)?\n(.*?)```'
     matches = re.findall(pattern, content, re.DOTALL)
 
     try:
-        # Create the output subdirectory if it doesn't exist
-        final_output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Ensured output subdirectory exists: '{final_output_dir}'")
+        temp_output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Ensured temporary output subdirectory exists: '{temp_output_dir}'")
     except OSError as e:
-        print(f"❌ Error creating output directory '{final_output_dir}': {e}")
+        print(f"❌ Error creating temporary output directory '{temp_output_dir}': {e}")
         print("Please ensure the application has write permissions to the base location.")
-        return
+        return None
 
-    count = 1 # Counter for generic filenames
-    processed_filenames_in_batch = set() # Tracks all filenames generated in this run to avoid internal clashes
+    count = 1
+    processed_filenames_in_batch = set()
+    files_extracted_count = 0
 
     if not matches:
-        print(f"No code blocks found in the input file: '{input_file_path.name}'")
-        return
+        print(f"No code blocks found in the input file: '{input_file_path.name}'.")
+        print(f"No files will be extracted, and no ZIP file will be created.")
+        # Attempt to clean up the newly created empty temporary directory
+        try:
+            if temp_output_dir.is_dir() and not any(temp_output_dir.iterdir()):
+                temp_output_dir.rmdir()
+                print(f"Cleaned up empty temporary directory: '{temp_output_dir}'")
+        except Exception as e:
+            print(f"Warning: Could not remove empty temporary directory '{temp_output_dir}': {e}")
+        return None # Indicate no useful output was generated
 
     print(f"\nProcessing '{input_file_path.name}' ({len(matches)} code blocks found)...")
 
-    # Iterate through each found code block
     for lang_hint, code_block_raw in matches:
-        code = code_block_raw.strip() # Remove leading/trailing whitespace from the code block
+        code = code_block_raw.strip()
         if not code:
             print(f"Skipping empty code block (match {count}).")
-            count += 1 # Increment generic counter even for skipped blocks
+            count += 1
             continue
 
-        # Determine the file extension based on language hint or content
         ext = detect_language_and_extension(code, lang_hint)
-        generated_file_name_str = None # Variable to hold the final filename
+        generated_file_name_str = None
 
-        # --- Filename Generation Logic ---
-        # Prioritize specific naming conventions (like Java class names)
         if ext == 'java':
-            # Use the enhanced function to find a suitable Java name
             java_name = extract_java_class_name(code)
             if java_name:
-                base_name = java_name # Use the extracted type name as the base
-                # Start suffix check from empty string to avoid _1 if original doesn't exist
+                base_name = java_name
                 suffix = ""
                 idx = 1
                 temp_name = f"{base_name}{suffix}.java"
-                # Check for uniqueness: Does the file exist OR have we already generated a file with this exact name in *this* run?
-                while (final_output_dir / temp_name).exists() or temp_name in processed_filenames_in_batch:
-                    suffix = f"_{idx}" # Add a numerical suffix
+                while (temp_output_dir / temp_name).exists() or temp_name in processed_filenames_in_batch:
+                    suffix = f"_{idx}"
                     idx += 1
                     temp_name = f"{base_name}{suffix}.java"
-                generated_file_name_str = temp_name # Found a unique name
+                generated_file_name_str = temp_name
             else:
-                # Fallback for Java if no suitable type name was found in the block
-                base_name = f"java_code_{count}" # Use a generic base name with the counter
+                base_name = f"java_code_{count}"
                 suffix = ""
                 idx_generic = 1
                 temp_name = f"{base_name}{suffix}.java"
-                 # Check for uniqueness against existing files and names already generated in this batch
-                while (final_output_dir / temp_name).exists() or temp_name in processed_filenames_in_batch:
+                while (temp_output_dir / temp_name).exists() or temp_name in processed_filenames_in_batch:
                     suffix = f"_{idx_generic}"
                     idx_generic += 1
                     temp_name = f"{base_name}{suffix}.java"
-                generated_file_name_str = temp_name # Found a unique name
+                generated_file_name_str = temp_name
 
-        # Handle Dockerfile and Makefile which are often named without a traditional extension
         elif ext in ["Dockerfile", "Makefile"]:
-             base_name_for_file = ext # Use 'Dockerfile' or 'Makefile' as the base name
-             current_ext = "" # These files typically don't have an extension part after the name
+             base_name_for_file = ext
+             current_ext = ""
 
              idx = 1
-             temp_name_for_unique_check = base_name_for_file # Start check with the base name
-             # Check for uniqueness against existing files and names already generated in this batch
-             while (final_output_dir / temp_name_for_unique_check).exists() or temp_name_for_unique_check in processed_filenames_in_batch:
-                 temp_name_for_unique_check = f"{base_name_for_file}_{idx}" # Add a numerical suffix
+             temp_name_for_unique_check = base_name_for_file
+             while (temp_output_dir / temp_name_for_unique_check).exists() or temp_name_for_unique_check in processed_filenames_in_batch:
+                 temp_name_for_unique_check = f"{base_name_for_file}_{idx}"
                  idx += 1
-             generated_file_name_str = temp_name_for_unique_check # Found a unique name
+             generated_file_name_str = temp_name_for_unique_check
 
-
-        # Generic naming for all other languages/extensions
         else:
-            base_name_for_file = f"extracted_code_{count}" # Use a generic base name with the counter
-            current_ext = f".{ext}" # Standard extension format
+            base_name_for_file = f"extracted_code_{count}"
+            current_ext = f".{ext}"
 
             idx = 1
-            temp_name_for_unique_check = f"{base_name_for_file}{current_ext}" # Start check with the base name + extension
-            # Check for uniqueness against existing files and names already generated in this batch
-            while (final_output_dir / temp_name_for_unique_check).exists() or temp_name_for_unique_check in processed_filenames_in_batch:
-                 temp_name_for_unique_check = f"{base_name_for_file}_{idx}{current_ext}" # Add a numerical suffix before the extension
+            temp_name_for_unique_check = f"{base_name_for_file}{current_ext}"
+            while (temp_output_dir / temp_name_for_unique_check).exists() or temp_name_for_unique_check in processed_filenames_in_batch:
+                 temp_name_for_unique_check = f"{base_name_for_file}_{idx}{current_ext}"
                  idx += 1
-            generated_file_name_str = temp_name_for_unique_check # Found a unique name
+            generated_file_name_str = temp_name_for_unique_check
 
-
-        # --- End of Filename Generation Logic ---
-
-        # Add the generated filename to the set of processed names for this batch
         if generated_file_name_str:
             processed_filenames_in_batch.add(generated_file_name_str)
-            full_path = final_output_dir / generated_file_name_str
+            full_path = temp_output_dir / generated_file_name_str
 
-            # --- Save the code block to the generated file ---
             try:
                 with open(full_path, 'w', encoding='utf-8') as out_file:
                     out_file.write(code)
-                # Report success relative to the base output directory for cleaner path display
-                relative_output_path = final_output_dir.relative_to(base_output_dir)
+                relative_output_path = full_path.relative_to(base_output_dir) # Changed to be relative to base_output_dir for clarity
                 print(f"✅ Saved: {generated_file_name_str} to '{relative_output_path}'")
+                files_extracted_count += 1
             except Exception as e:
                 print(f"❌ Error saving '{generated_file_name_str}' to '{full_path}': {e}")
         else:
-            # This case should ideally not happen if naming logic covers all `ext` values,
-            # but as a safeguard.
             print(f"❌ Error: Could not determine a valid filename for code block {count}.")
 
-        count += 1 # Increment the generic counter for the next block
+        count += 1
 
+    print(f"\n--- Extraction Summary ---")
+    print(f"Total code blocks found: {len(matches)}")
+    print(f"Successfully extracted {files_extracted_count} files to temporary location: '{temp_output_dir}'")
 
-    print("\nProcessing complete.")
-    if not matches:
-         print("No code blocks found, so no files were created.")
+    if files_extracted_count == 0:
+        print("\nNo files were successfully extracted. No ZIP archive will be created.")
+        # Attempt to clean up the empty temporary directory
+        try:
+            if temp_output_dir.is_dir():
+                shutil.rmtree(temp_output_dir)
+                print(f"Cleaned up empty temporary directory: '{temp_output_dir}'")
+        except Exception as e:
+            print(f"Warning: Could not remove empty temporary directory '{temp_output_dir}': {e}")
+        return None
+
+    # --- Zipping Logic ---
+    print(f"\n--- Zipping Process ---")
+    print(f"Target ZIP file: '{zip_filename}'")
+    try:
+        # Check if the zip file already exists and remove it to avoid issues with stale content
+        if zip_filename.exists():
+            print(f"Existing ZIP file found: '{zip_filename}'. Deleting before recreation...")
+            zip_filename.unlink()
+
+        with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(temp_output_dir):
+                for file in files:
+                    file_path = Path(root) / file
+                    # arcname is the path inside the zip. This makes the zip contain a folder
+                    # named like the temp_output_subdir_name (e.g., 'my_file_extracted_code_temp/MyClass.java')
+                    arcname = file_path.relative_to(temp_output_dir.parent)
+                    print(f"  Adding '{file_path.name}' to ZIP as '{arcname}'")
+                    zipf.write(file_path, arcname)
+        print(f"✅ Successfully compressed {files_extracted_count} files to: '{zip_filename}'")
+        return zip_filename
+    except Exception as e:
+        print(f"❌ Error compressing files to '{zip_filename}': {e}")
+        print(f"The extracted files could not be zipped. They are still available in the temporary directory: '{temp_output_dir}'")
+        return temp_output_dir # Return the path to the temporary directory if zipping fails
+    finally:
+        # Clean up the temporary directory regardless of zipping success or failure,
+        # UNLESS the temporary directory itself became the output (if zipping failed).
+        # This prevents accidental deletion of files if the return path is the temp dir.
+        if temp_output_dir.is_dir() and temp_output_dir != zip_filename: # Ensure we don't try to remove the zip itself
+            try:
+                print(f"\n--- Cleanup Process ---")
+                print(f"Removing temporary directory: '{temp_output_dir}'")
+                shutil.rmtree(temp_output_dir)
+                print(f"✅ Temporary directory removed.")
+            except Exception as e:
+                print(f"❌ Warning: Could not remove temporary directory '{temp_output_dir}': {e}")
 
 
 def select_input_file(initial_dir):
-    # Use tkinter for the file dialog (GUI)
     root = tk.Tk()
-    root.withdraw() # Hide the main Tkinter window
+    root.withdraw()
     file_path = filedialog.askopenfilename(
         initialdir=initial_dir,
         title="Select Input Text File with Code Blocks",
-        filetypes=(("Text files", "*.txt"), ("Markdown files", "*.md"), ("All files", "*.*")) # Filter file types
+        filetypes=(("Text files", "*.txt"), ("Markdown files", "*.md"), ("All files", "*.*"))
     )
-    root.destroy() # Destroy the root window after the dialog is closed
+    root.destroy()
     return file_path
 
 def select_output_directory(initial_dir):
-    # Use tkinter for the directory dialog (GUI)
     root = tk.Tk()
-    root.withdraw() # Hide the main Tkinter window
+    root.withdraw()
     dir_path = filedialog.askdirectory(
         initialdir=initial_dir,
-        title="Select Base Output Directory (a subdirectory will be created here)"
+        title="Select Base Output Directory (the ZIP file will be created here)"
     )
-    root.destroy() # Destroy the root window after the dialog is closed
+    root.destroy()
     return dir_path
 
 if __name__ == "__main__":
-    print("Welcome to the Code Block Extractor!")
-    # Determine a sensible starting directory for the file dialogs
+    print("Welcome to the Code Block Extractor and Compressor!")
     common_initial_dir = get_initial_dialog_dir()
 
     print(f"\nPlease select the text file containing code blocks (e.g., a .txt or .md file).")
     print(f"(Dialog will start in: '{common_initial_dir}')")
-    input_file = select_input_file(common_initial_dir) # Call function to open file dialog
+    input_file = select_input_file(common_initial_dir)
 
-    if input_file: # Proceed only if a file was selected (not cancelled)
+    if input_file:
         input_file_path_obj = Path(input_file)
         print(f"Selected input file: '{input_file_path_obj.name}'")
 
-        print(f"\nPlease select the base directory where extracted code files will be saved.")
-        # Explain that a subdirectory will be created for organization
-        print(f"A new subdirectory (e.g., '{input_file_path_obj.stem}_extracted_code') will be created inside your chosen location.")
+        print(f"\nPlease select the base directory where the compressed ZIP file will be saved.")
+        print(f"(A temporary working directory will be created and then removed.)")
         print(f"(Dialog will start in: '{common_initial_dir}')")
 
-        output_dir_base = select_output_directory(common_initial_dir) # Call function to open directory dialog
+        output_dir_base = select_output_directory(common_initial_dir)
 
-        if output_dir_base: # Proceed only if a directory was selected (not cancelled)
+        if output_dir_base:
             print(f"Selected base output directory: '{output_dir_base}'")
-            # Execute the core logic to extract and save the code blocks
-            extract_code_blocks(input_file, output_dir_base)
+            final_output_artifact_path = extract_code_blocks(input_file, output_dir_base)
+
+            if final_output_artifact_path:
+                print(f"\n--- Program Result ---")
+                if final_output_artifact_path.suffix == '.zip':
+                    print(f"✅ Successfully created a compressed ZIP archive: '{final_output_artifact_path}'")
+                    folder_to_open = final_output_artifact_path.parent
+                else: # This means zipping failed, and the temporary directory with extracted files is returned
+                    print(f"⚠️ Compression failed. The extracted files are located in the temporary directory: '{final_output_artifact_path}'")
+                    folder_to_open = final_output_artifact_path # Open the temp dir, as it contains the files
+
+                print(f"Opening folder: '{folder_to_open}'")
+                open_folder_in_explorer(folder_to_open)
+            else:
+                print("\n⚠️ Code block extraction process was cancelled or no code blocks were found, so no output was generated.")
+
             print("\nProgram execution finished.")
         else:
             print("Base output directory selection cancelled. Exiting.")
     else:
         print("Input file selection cancelled. Exiting.")
-
-# --- END OF FILE code (2) - Copy.txt (Refined for Java Naming) ---
